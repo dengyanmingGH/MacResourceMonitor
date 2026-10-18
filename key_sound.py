@@ -28,11 +28,19 @@ macOS 在 NSGlobalDomain 下以三组 keys 存储该面板所有选项：
 注意
 ----
 键盘「按键声」（key click）在 macOS 是输入法的一部分，没有暴露给三方应用的
-全局开关；本功能控制的「提示音音量/界面声音效果」才是 Tikey 的核心滑块范围。
+全局开关；但我们可以通过 Accessibility 监听按键并播放指定提示音，
+实现「按键声音」功能（与 Tikey 的键盘声音效果一致）。
+
+该监听需要 Accessibility 授权：
+  - 非签名 / 非沙箱的 Python bundle 无法静默获得；首次请求时会弹出对话框并跳转
+    「系统设置 > 隐私与安全 > 辅助功能」；
+  - 若用户拒绝或未授权，监听自动降级为关闭，应用不受影响。
 """
 
 import re
 import subprocess
+import sys
+import threading
 
 # 三个偏好键
 _BEEP_VOLUME = "com.apple.sound.beep.volume"
@@ -41,6 +49,164 @@ _BEEP_FLASH = "com.apple.sound.beep.flash"
 
 # osascript 的音量百分比与 0..1 之间的转换
 _PCT_TO_FLOAT = 1.0 / 100.0
+
+# ---- 按键声音配置（本地持久化到 ~/.config/MacResourceMonitor/key_sound.json） ----
+import json as _json, os as _os
+_CFG_DIR = _os.path.join(_os.path.expanduser("~"),
+                         "Library", "Application Support", "MacResourceMonitor")
+_KEY_CFG = _os.path.join(_CFG_DIR, "key_sound.json")
+_DEFAULT_KEY_CFG = {
+    "key_enabled": False,      # 按键声音开关
+    "key_sound": "Ping",       # 系统声音名称
+    "key_volume": 0.5,          # 单独音量 0.0~1.0（NSSound.setVolume_）
+}
+
+
+def _load_key_cfg():
+    try:
+        with open(_KEY_CFG) as f:
+            d = _DEFAULT_KEY_CFG.copy()
+            d.update(_json.load(f))
+            return d
+    except Exception:
+        return _DEFAULT_KEY_CFG.copy()
+
+
+def _save_key_cfg(d):
+    try:
+        _os.makedirs(_CFG_DIR, exist_ok=True)
+        with open(_KEY_CFG, "w") as f:
+            _json.dump(d, f)
+    except Exception:
+        pass
+
+
+# ---- 按键声音开关 / 音量 / 声音名称 ----
+
+def key_sound_enabled():
+    return bool(_load_key_cfg().get("key_enabled", False))
+
+
+def set_key_sound_enabled(v):
+    d = _load_key_cfg(); d["key_enabled"] = bool(v); _save_key_cfg(d)
+    if not v:
+        stop_key_listener()  # 关闭时停止监听
+    else:
+        start_key_listener()
+    return True
+
+
+def key_sound_name():
+    return _load_key_cfg().get("key_sound", "Ping")
+
+
+def set_key_sound_name(name):
+    d = _load_key_cfg(); d["key_sound"] = name; _save_key_cfg(d)
+    return True
+
+
+def key_sound_volume():
+    try:
+        return float(_load_key_cfg().get("key_volume", 0.5))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def set_key_sound_volume(v):
+    v = max(0.0, min(1.0, float(v)))
+    d = _load_key_cfg(); d["key_volume"] = v; _save_key_cfg(d)
+    return True
+
+
+# ---- 播放 + 监听 ----
+
+# macOS 自带的 short system sounds
+SYSTEM_SOUNDS = ["Basso", "Blow", "Blow (Bottom)", "Ping", "Pop",
+                 "Submarine", "Tink", "Funk", "Glass"]
+
+# Accessibility 按键监听句柄
+_tap = {"running": False, "loop": None, "thread": None}
+
+
+def _play_key_sound():
+    try:
+        from AppKit import NSSound
+        s = NSSound.soundNamed_(key_sound_name())
+        if s is None:
+            s = NSSound.soundNamed_("Ping")
+        if s is not None:
+            try:
+                s.setVolume_(key_sound_volume())
+            except Exception:
+                pass
+            s.play()
+    except Exception as e:
+        print("key_sound play error:", e, file=sys.stderr)
+
+
+def play_key_sound_once():
+    """主动播放一次按键声（用于测试）。"""
+    _play_key_sound()
+    return True
+
+
+def start_key_listener():
+    """尝试开启 Accessibility 按键监听。
+
+    非签名应用将被 TCC 拒绝；失败时静默降级（key_enabled 仍留 True，
+    但不再播放）。"""
+    import sys
+    if _tap["running"]:
+        return
+    try:
+        from Quartz import (CGEventTapCreate, CGEventTapCallBack,
+                            kCGHIDEventTap, kCGEventKeyDown)
+        import CoreFoundation as _cf
+        from AppKit import NSApp
+    except Exception:
+        # Quartz 未绑定核对（如当前 Python bundle）或缺少 Accessibility 授权；
+        # 此时监听不可用，静默降级——「按键声音」开关仍会在手动触发时播放。
+        return
+
+    app = NSApp() if NSApp() is not None else None
+
+    def callback(proxy, type_, event, refcon):
+        try:
+            if int(type_) == kCGEventKeyDown:
+                _play_key_sound()
+        except Exception:
+            pass
+        return event
+
+    tap = CGEventTapCreate(
+        0, 0, kCGHIDEventTap, 0, kCGEventKeyDown, callback, None)
+    if tap is None:
+        # 缺少 Accessibility 授权 → 静默降级（可点击菜单重新尝试）。
+        return
+
+    loop = _cf.CFRunLoopGetCurrent()
+    src = _cf.CFMachPortCreateRunLoopSource(None, tap, 0)
+    _cf.CFRunLoopAddSource(loop, src, _cf.kCFRunLoopCommonModes)
+    _tap["loop"] = loop
+
+    def run():
+        _tap["running"] = True
+        _cf.CFRunLoopRun()
+
+    _tap["thread"] = threading.Thread(target=run, daemon=True)
+    _tap["thread"].start()
+
+
+def stop_key_listener():
+    if not _tap["running"]:
+        return
+    if _tap.get("loop") is not None:
+        try:
+            import CoreFoundation as cf
+            cf.CFRunLoopStop(_tap["loop"])
+        except Exception:
+            pass
+    _tap["running"] = False
 
 
 def _run(cmd, timeout=5):
@@ -169,6 +335,9 @@ def status():
         "enabled": ui_sounds_enabled(),
         "volume": alert_volume(),
         "flash": flash_when_beep(),
+        "key_enabled": key_sound_enabled(),
+        "key_sound": key_sound_name(),
+        "key_volume": key_sound_volume(),
     }
 
 
