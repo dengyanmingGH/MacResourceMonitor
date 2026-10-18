@@ -37,6 +37,8 @@ from Foundation import NSObject, NSAttributedString
 from AppKit import (NSView, NSBezierPath, NSColor, NSFont, NSTextField,
                     NSMakeRect, NSMakePoint, NSMakeSize)
 
+from float_window import FloatWindow
+
 # ============================================================
 # 配置持久化
 # ============================================================
@@ -53,6 +55,14 @@ DEFAULT_CONFIG = {
     "alerts_enabled": True,    # 温度告警总开关
     "thermal_alert": True,     # 热压力告警开关
     "history_len": 60,         # 详情窗口曲线保留点数
+    # —— 浮窗 / 小组件 ——
+    "float_window_w": 230,     # 浮窗宽度
+    "float_window_h": 110,     # 浮窗高度
+    "float_window_x": None,    # 浮窗位置 x（None=居中）
+    "float_window_y": None,    # 浮窗位置 y
+    "float_window_topmost": True,     # 始终置顶
+    "float_window_click_through": False,  # 点击穿透
+    "float_window_corner": 12.0,      # 圆角半径
 }
 
 
@@ -65,7 +75,10 @@ def load_config():
         if isinstance(data, dict):
             for k, dv in DEFAULT_CONFIG.items():
                 v = data.get(k)
-                if type(v) == type(dv):  # noqa: E721 严格类型匹配，避免 bool/int 混淆
+                if k in ("float_window_x", "float_window_y"):
+                    # 允许 float/None（None 表示居中）
+                    cfg[k] = v if isinstance(v, (int, float)) else dv
+                elif type(v) == type(dv):  # noqa: E721 严格类型匹配，避免 bool/int 混淆
                     cfg[k] = v
     except Exception:
         pass
@@ -1282,6 +1295,10 @@ class SystemMonitorApp(rumps.App):
         self.health_item = rumps.MenuItem("数据源: --")
         self.force_pm_item = rumps.MenuItem("立即刷新 GPU/CPU 数据", callback=self._force_pm)
 
+        self.float_item = rumps.MenuItem(
+            "显示浮窗", callback=self.toggle_float)
+        self.float_item.state = 0
+
         self.cpu_item = rumps.MenuItem("CPU: --")
         self.mem_item = rumps.MenuItem("内存: --")
         self.disk_item = rumps.MenuItem("磁盘: --")
@@ -1296,6 +1313,7 @@ class SystemMonitorApp(rumps.App):
             self.pm_menu,
             self.alert_menu,
             self.force_pm_item,
+            self.float_item,
             None,
             self.health_item,
             None,
@@ -1312,6 +1330,7 @@ class SystemMonitorApp(rumps.App):
 
         self.details = DetailsWindow()
         self.details.alert_threshold = float(self.config.get("temp_threshold", 90))
+        self.floatwin = None
         self.collector = Collector(interval=2.0, config=self.config)
         self.collector.start()
 
@@ -1372,6 +1391,17 @@ class SystemMonitorApp(rumps.App):
             self.details.show()
             self.collector.set_track_processes(True)
             self.details.update(self.collector.get())
+
+    def toggle_float(self, _):
+        if self.floatwin is not None and self.floatwin.is_visible():
+            self.floatwin.hide()
+            self.float_item.state = 0
+        else:
+            if self.floatwin is None:
+                self.floatwin = FloatWindow(self)
+            self.floatwin.show()
+            self.float_item.state = 1
+            self.floatwin.update(self.collector.get())
 
     # ---- 告警 ----
 
@@ -1501,6 +1531,9 @@ class SystemMonitorApp(rumps.App):
 
             if self.details.is_visible():
                 self.details.update(s)
+
+            if self.floatwin is not None and self.floatwin.is_visible():
+                self.floatwin.update(s)
 
         except Exception as e:
             print("refresh error:", e, file=sys.stderr)

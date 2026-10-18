@@ -86,6 +86,7 @@ cc -O2 -o "$APP/Contents/MacOS/MacResourceMonitor" launcher.c
 echo "==> 5/6 复制依赖、程序与 Info.plist"
 cp -R "$CACHE" "$RES/lib"
 cp system_monitor.py "$RES/"
+cp float_window.py "$RES/"
 # 解释器路径写入 Resources/，启动器据此启动（带回退链）
 echo "$PY" > "$RES/interpreter"
 
