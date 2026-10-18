@@ -35,7 +35,7 @@ import rumps
 import objc
 from Foundation import NSObject, NSAttributedString
 from AppKit import (NSView, NSBezierPath, NSColor, NSFont, NSTextField,
-                    NSMakeRect, NSMakePoint, NSMakeSize)
+                    NSMakeRect, NSMakePoint, NSMakeSize, NSSlider)
 
 from float_window import FloatWindow
 
@@ -1299,6 +1299,23 @@ class SystemMonitorApp(rumps.App):
             "显示浮窗", callback=self.toggle_float)
         self.float_item.state = 0
 
+        # ---- 声音设置子菜单（Tikey 类） ----
+        import key_sound as ks
+        self._ks = ks
+        self._sound_menu = rumps.MenuItem("声音设置")
+        self._sound_beep_toggle = rumps.MenuItem(
+            "界面声音效果", callback=self._toggle_ui_sounds)
+        self._sound_flash_toggle = rumps.MenuItem(
+            "闪屏提示", callback=self._toggle_flash)
+        self._sound_volume_item = rumps.MenuItem(
+            "提示音音量 — —", callback=self._sound_volume_menu)
+        self._sound_volume_items = {}   # pct -> MenuItem
+        self._sound_open_item = rumps.MenuItem(
+            "打开声音设置", callback=self._open_sound_prefs)
+
+        # Tikey 式连续滑块面板（菜单项「更多声音设置…」打开）
+        self.sound_panel = None
+
         self.cpu_item = rumps.MenuItem("CPU: --")
         self.mem_item = rumps.MenuItem("内存: --")
         self.disk_item = rumps.MenuItem("磁盘: --")
@@ -1314,6 +1331,7 @@ class SystemMonitorApp(rumps.App):
             self.alert_menu,
             self.force_pm_item,
             self.float_item,
+            self._sound_menu,
             None,
             self.health_item,
             None,
@@ -1325,6 +1343,9 @@ class SystemMonitorApp(rumps.App):
             self.fan_item,
             self.net_item,
         ]
+
+        self._build_sound_volume_submenu()
+        self._sync_sound_menu()
 
         self._sync_menu_states()
 
@@ -1414,6 +1435,11 @@ class SystemMonitorApp(rumps.App):
             rumps.notification(APP_NAME, title, message)
         except Exception as e:
             print("notification error:", e, file=sys.stderr)
+        # 触发系统提示音/闪屏（尊听「声音设置」子菜单）
+        try:
+            self._ks.play_alert_sound()
+        except Exception as e:
+            print("sound error:", e, file=sys.stderr)
 
     def _check_alerts(self, s):
         if not self.config.get("alerts_enabled", True):
@@ -1430,6 +1456,66 @@ class SystemMonitorApp(rumps.App):
             if level and level != "Nominal":
                 self._fire_alert("thermal", "系统热压力提升",
                                  "当前等级: {}".format(level))
+
+    # ---- 声音设置（Tikey 类）----
+
+    def _build_sound_volume_submenu(self):
+        self._sound_menu.clear() if False else None
+        self._sound_menu.add(self._sound_beep_toggle)
+        self._sound_menu.add(self._sound_flash_toggle)
+        self._sound_menu.add(self._sound_volume_item)
+        vol_menu = rumps.MenuItem("提示音音量")  # 分档
+        self._sound_volume_items = {}
+        for pct in (0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100):
+            item = rumps.MenuItem(
+                "{}%".format(pct), callback=self._set_volume_pct)
+            item._mrm_pct = pct
+            self._sound_volume_items[pct] = item
+            vol_menu.add(item)
+        self._sound_menu.add(vol_menu)
+        self._sound_menu.add(self._sound_open_item)
+        self._sound_slider_item = rumps.MenuItem(
+            "更多声音设置…", callback=self._open_sound_slider)
+
+    def _sync_sound_menu(self):
+        ks = self._ks
+        self._sound_beep_toggle.state = 1 if ks.ui_sounds_enabled() else 0
+        self._sound_flash_toggle.state = 1 if ks.flash_when_beep() else 0
+        pct = int(round(ks.alert_volume() * 100))
+        self._sound_volume_item.title = "提示音音量 {}%".format(pct)
+        for p, item in self._sound_volume_items.items():
+            item.state = 1 if p == pct else 0
+
+    def _toggle_ui_sounds(self, _):
+        ks = self._ks
+        ks.set_ui_sounds(not ks.ui_sounds_enabled())
+        self._sync_sound_menu()
+
+    def _toggle_flash(self, _):
+        ks = self._ks
+        ks.set_flash_when_beep(not ks.flash_when_beep())
+        self._sync_sound_menu()
+
+    def _set_volume_pct(self, sender):
+        pct = int(getattr(sender, "_mrm_pct", 50) or 50)
+        self._ks.set_alert_volume(pct / 100.0)
+        self._sync_sound_menu()
+
+    def _sound_volume_menu(self, _):
+        # 点击「提示音音量」行也弹开子菜单（rumps 自动）；这里刷新单选。
+        self._sync_sound_menu()
+
+    def _open_sound_prefs(self, _):
+        try:
+            subprocess.Popen(["/usr/bin/open", "x-apple.systempreferences:com.apple.Sound-Settings"])
+        except Exception:
+            pass
+
+    def _open_sound_slider(self, _):
+        if self.sound_panel is None:
+            from float_window import SoundPanel
+            self.sound_panel = SoundPanel(self)
+        self.sound_panel.show()
 
     # ---- 刷新 ----
 
@@ -1528,6 +1614,7 @@ class SystemMonitorApp(rumps.App):
                 h.get("ismc", "?"), h.get("pm", "?"))
 
             self._check_alerts(s)
+            self._sync_sound_menu()
 
             if self.details.is_visible():
                 self.details.update(s)

@@ -140,6 +140,27 @@ def set_flash_when_beep(enabled):
     return rc == 0
 
 
+# ---------- 发出系统提示音 ----------
+
+def play_alert_sound():
+    """播放一条系统提示音。
+
+    仅当「界面声音效果」开启时播放；关闭时静默。播放逻辑：
+      - 先写 com.apple.sound.beep.volume，交给 macOS 控制音量与闪屏，
+      - 再调用 AppKit.NSBeep 触发系统默认提示音。
+    """
+    if not ui_sounds_enabled():
+        return False
+    try:
+        from AppKit import NSBeep
+        NSBeep()
+        return True
+    except Exception:
+        # 降级：osascript 播放内置提示音资源
+        _osascript('display notification "" sound name "Ping"')
+        return True
+
+
 # ---------- 批量获取/设置（用于菜单渲染） ----------
 
 def status():

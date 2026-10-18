@@ -19,7 +19,8 @@ import time
 import objc
 from Foundation import NSObject, NSMakeRect
 from AppKit import (
-    NSView, NSButton, NSButtonCell, NSPanel, NSApplication, NSColor, NSFont, NSTextField,
+    NSView, NSButton, NSButtonCell, NSPanel, NSApplication, NSColor, NSFont,
+    NSTextField, NSSlider,
     NSBackingStoreBuffered, NSStatusWindowLevel, NSFloatingWindowLevel,
     NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel,
 )
@@ -266,3 +267,127 @@ def _pct(v):
     if v is None:
         return "--"
     return "{:.0f}%".format(v)
+
+
+# ============================================================
+# 声音设置滑动面板（Tikey 类 UI）
+# ============================================================
+
+class SoundPanel:
+    """一个极小的悬浮面板，嵌入 NSSlider 连续控制提示音音量。
+
+    复用 key_sound 模块（osascript + defaults），无额外权限。
+    面板本身不是必须的 —— 菜单离散分档已足够 MVP —— 但它给出
+    与 Tikey 一致的「拖动滑块即时调出系统提示音」体验。
+    """
+
+    W, H = 230, 110
+
+    def __init__(self, app):
+        self._app = app
+        self.panel = None
+        self.slider = None
+        self.pct_label = None
+        self.beep_btn = None
+        self.flash_btn = None
+
+    def _create(self):
+        from AppKit import (NSView, NSColor, NSFont, NSPanel, NSTextField,
+                            NSSlider, NSButton, NSWindowStyleMaskBorderless,
+                            NSWindowStyleMaskNonactivatingPanel,
+                            NSBackingStoreBuffered, NSStatusWindowLevel)
+
+        if self.panel is not None:
+            return
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, self.W, self.H),
+            NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+            NSBackingStoreBuffered, False)
+        panel.setFloatingPanel_(True)
+        panel.setBecomesKeyOnlyIfNeeded_(True)
+        panel.setHidesOnDeactivate_(False)
+        panel.setOpaque_(False)
+        panel.setBackgroundColor_(
+            NSColor.windowBackgroundColor().colorWithAlphaComponent_(0.88))
+        panel.setHasShadow_(True)
+        panel.setLevel_(NSStatusWindowLevel)
+
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, self.W, self.H))
+        view.setWantsLayer_(True)
+
+        # 标题
+        title = NSTextField.labelWithStringValue_withFrame_(
+            "提示音设置", NSMakeRect(12, self.H - 22, self.W - 24, 17))
+        title.setFont_(NSFont.boldSystemFontOfSize_(12))
+        view.addSubview_(title)
+
+        # 百分比标签
+        self.pct_label = NSTextField.labelWithStringValue_withFrame_(
+            "—", NSMakeRect(12, self.H - 48, 60, 15))
+        self.pct_label.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(12, 0))
+        view.addSubview_(self.pct_label)
+
+        # 滑块
+        self.slider = NSSlider.alloc().initWithFrame_(
+            NSMakeRect(72, self.H - 46, self.W - 84, 18))
+        self.slider.setNumberOfTickMarks_(11)
+        self.slider.setTickMarkPosition_(1)  # linear
+        self.slider.setAllowsContinuous_(True)
+        self.slider.setTarget_(self)
+        self.slider.setAction_("sliderChanged:")
+        view.addSubview_(self.slider)
+
+        # 开启界面声音效果
+        self.beep_btn = NSButton.buttonWithTitle_target_action_(
+            "界面声音效果", self, "toggleBeep:")
+        self.beep_btn.setFrame_(NSMakeRect(12, 18, 100, 24))
+        self.beep_btn.setBezelStyle_(2)  # push
+        view.addSubview_(self.beep_btn)
+
+        # 闪屏
+        self.flash_btn = NSButton.buttonWithTitle_target_action_(
+            "闪屏提示", self, "toggleFlash:")
+        self.flash_btn.setFrame_(NSMakeRect(120, 18, 100, 24))
+        self.flash_btn.setBezelStyle_(2)
+        view.addSubview_(self.flash_btn)
+
+        panel.setContentView_(view)
+        self.panel = panel
+        self._sync_ui()
+
+    def sliderChanged_(self, sender):
+        pct = int(sender.doubleValue())
+        self._app._ks.set_alert_volume(pct / 100.0)
+        self._sync_ui()
+
+    def toggleBeep_(self, sender):
+        ks = self._app._ks
+        ks.set_ui_sounds(not ks.ui_sounds_enabled())
+        self._sync_ui()
+
+    def toggleFlash_(self, sender):
+        ks = self._app._ks
+        ks.set_flash_when_beep(not ks.flash_when_beep())
+        self._sync_ui()
+
+    def _sync_ui(self):
+        ks = self._app._ks
+        pct = int(round(ks.alert_volume() * 100))
+        if self.slider is not None:
+            self.slider.setDoubleValue_(pct)
+        if self.pct_label is not None:
+            self.pct_label.setStringValue_("{}%".format(pct))
+        if self.beep_btn is not None:
+            self.beep_btn.setState_(1 if ks.ui_sounds_enabled() else 0)
+        if self.flash_btn is not None:
+            self.flash_btn.setState_(1 if ks.flash_when_beep() else 0)
+
+    def show(self):
+        if self.panel is None:
+            self._create()
+        self._sync_ui()
+        self.panel.makeKeyAndOrderFront_(None)
+
+    def hide(self):
+        if self.panel is not None:
+            self.panel.orderOut_(None)
